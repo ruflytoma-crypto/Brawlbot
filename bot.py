@@ -1,181 +1,48 @@
-import telebot
-import requests
-import time
-import json
-import os
-import threading
+import os,json,time,threading,requests,telebot
 
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "PUT_TOKEN_HERE")
-BS_API_TOKEN = os.environ.get("BS_API_TOKEN", "PUT_API_TOKEN_HERE")
+bot=telebot.TeleBot(os.environ.get('TELEGRAM_TOKEN'))
+HEADERS={'Authorization':'Bearer '+os.environ.get('BS_API_TOKEN','')}
+API='https://api.brawlstars.com/v1'
+players={}
 
-bot = telebot.TeleBot(TELEGRAM_TOKEN)
 
-HEADERS = {"Authorization": f"Bearer {BS_API_TOKEN}"}
-BS_API = "https://api.brawlstars.com/v1"
+def api(tag):
+    r=requests.get(f"{API}/players/%23{tag.replace('#','')}",headers=HEADERS,timeout=15)
+    return r.status_code,r.text
 
-DATA_FILE = "players.json"
 
-def load_data():
-    if os.path.exists(DATA_FILE):
-        with open(DATA_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {}
-
-def save_data():
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(tracked_players, f, ensure_ascii=False, indent=2)
-
-tracked_players = load_data()
-
-def get_player(tag):
-    tag_encoded = tag.replace("#", "%23")
-    url = f"{BS_API}/players/{tag_encoded}"
-
-    try:
-        r = requests.get(url, headers=HEADERS, timeout=15)
-
-        if r.status_code == 200:
-            return r.json()
-
-    except Exception as e:
-        print(e)
-
+def get(tag):
+    s,t=api(tag)
+    if s==200:return json.loads(t)
     return None
 
-@bot.message_handler(commands=["start"])
-def start(message):
-    bot.reply_to(
-        message,
-        "/track #TAG\n"
-        "/stop #TAG\n"
-        "/status"
-    )
+@bot.message_handler(commands=['track'])
+def track(m):
+    a=m.text.split()
+    if len(a)<2:return
+    tag=a[1].upper()
+    if not tag.startswith('#'):tag='#'+tag
+    p=get(tag)
+    if not p:
+        s,t=api(tag);bot.reply_to(m,f'🛠 API DEBUG\nSTATUS: {s}\n{t[:800]}');return
+    players[tag]={'chat':m.chat.id,'b':{x['name']:x['trophies'] for x in p['brawlers']}}
+    bot.reply_to(m,'✅ Отслеживание включено '+tag)
 
-@bot.message_handler(commands=["track"])
-def track(message):
-    parts = message.text.split()
+@bot.message_handler(commands=['status'])
+def status(m):bot.reply_to(m,'\n'.join(players) if players else 'Пусто')
 
-    if len(parts) < 2:
-        bot.reply_to(message, "Используй: /track #TAG")
-        return
 
-    tag = parts[1].upper()
-
-    if not tag.startswith("#"):
-        tag = "#" + tag
-
-    player = get_player(tag)
-
-    if not player:
-        bot.reply_to(message, "Игрок не найден")
-        return
-
-    brawlers = {}
-
-    for b in player.get("brawlers", []):
-        brawlers[b["name"]] = b["trophies"]
-
-    tracked_players[tag] = {
-        "group_id": message.chat.id,
-        "name": player.get("name", tag),
-        "brawlers": brawlers
-    }
-
-    save_data()
-
-    bot.reply_to(
-        message,
-        f"✅ Отслеживание включено\n{player.get('name')} ({tag})"
-    )
-
-@bot.message_handler(commands=["stop"])
-def stop(message):
-    parts = message.text.split()
-
-    if len(parts) < 2:
-        return
-
-    tag = parts[1].upper()
-
-    if not tag.startswith("#"):
-        tag = "#" + tag
-
-    if tag in tracked_players:
-        del tracked_players[tag]
-        save_data()
-        bot.reply_to(message, "🛑 Удалено")
-
-@bot.message_handler(commands=["status"])
-def status(message):
-    if not tracked_players:
-        bot.reply_to(message, "Пусто")
-        return
-
-    text = "📋 Отслеживаемые игроки:\n\n"
-
-    for tag, data in tracked_players.items():
-        text += f"{data['name']} {tag}\n"
-
-    bot.reply_to(message, text)
-
-def tracker():
+def loop():
     while True:
-
-        for tag in list(tracked_players.keys()):
-
-            try:
-                data = tracked_players[tag]
-
-                player = get_player(tag)
-
-                if not player:
-                    continue
-
-                current = {}
-
-                for b in player.get("brawlers", []):
-                    current[b["name"]] = b["trophies"]
-
-                old = data["brawlers"]
-
-                for name, new_trophies in current.items():
-
-                    old_trophies = old.get(name)
-
-                    if old_trophies is None:
-                        continue
-
-                    if old_trophies != new_trophies:
-
-                        diff = new_trophies - old_trophies
-
-                        if diff > 0:
-                            msg = (
-                                f"📈 {name}\n"
-                                f"{old_trophies} → {new_trophies}\n"
-                                f"(+{diff})"
-                            )
-                        else:
-                            msg = (
-                                f"📉 {name}\n"
-                                f"{old_trophies} → {new_trophies}\n"
-                                f"({diff})"
-                            )
-
-                        bot.send_message(
-                            data["group_id"],
-                            msg
-                        )
-
-                tracked_players[tag]["brawlers"] = current
-
-                save_data()
-
-            except Exception as e:
-                print(e)
-
+        for tag,d in list(players.items()):
+            p=get(tag)
+            if not p: continue
+            now={x['name']:x['trophies'] for x in p['brawlers']}
+            for n,v in now.items():
+                if n in d['b'] and d['b'][n]!=v:
+                    old=d['b'][n];bot.send_message(d['chat'],f"{'📈' if v>old else '📉'} {n}\n{old} → {v}\n({v-old:+})")
+            d['b']=now
         time.sleep(60)
 
-if __name__ == "__main__":
-    threading.Thread(target=tracker, daemon=True).start()
-    bot.infinity_polling(skip_pending=True)
+threading.Thread(target=loop,daemon=True).start()
+bot.infinity_polling()
