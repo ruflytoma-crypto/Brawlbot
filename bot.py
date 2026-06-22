@@ -212,11 +212,33 @@ def check_battles():
 
         time.sleep(60)  # Проверка каждую минуту
 
+@bot.message_handler(commands=["myip"])
+def cmd_myip(message):
+    try:
+        ip = requests.get("https://ifconfig.me", timeout=5).text.strip()
+        bot.reply_to(message, f"🌐 IP сервера: <code>{ip}</code>\n\nДобавь этот IP в Brawl Stars API!", parse_mode="HTML")
+    except:
+        bot.reply_to(message, "❌ Не удалось получить IP")
+
+def send_server_ip():
+    """Отправляет IP сервера владельцу при старте"""
+    try:
+        time.sleep(3)
+        ip = requests.get("https://ifconfig.me", timeout=5).text.strip()
+        # Берём chat_id из первого отслеживаемого или пропускаем
+        print(f"[*] IP сервера: {ip}")
+    except Exception as e:
+        print(f"[!] Не удалось получить IP: {e}")
+
 # ========== ЗАПУСК ==========
 if __name__ == "__main__":
     import threading
 
     print("[*] Бот запускается...")
+
+    # Узнаём IP
+    ip_thread = threading.Thread(target=send_server_ip, daemon=True)
+    ip_thread.start()
 
     # Запускаем трекер в отдельном потоке
     tracker_thread = threading.Thread(target=check_battles, daemon=True)
