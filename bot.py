@@ -1,48 +1,115 @@
-import os,json,time,threading,requests,telebot
+import telebot
+import threading
+import time
+import json
+import os
+import requests
 
-bot=telebot.TeleBot(os.environ.get('TELEGRAM_TOKEN'))
-HEADERS={'Authorization':'Bearer '+os.environ.get('BS_API_TOKEN','')}
-API='https://api.brawlstars.com/v1'
-players={}
+# =================== НАСТРОЙКИ ===================
+BOT_TOKEN = "7876393156:AAH2IeCNjMUGszgtQ9dYZOnyaJxRyLAlG1U"  # замени после revoke
+PLAYER_TAG = "#QJYUYQ8GY"
+CHAT_ID = "7960700753"
+CHECK_INTERVAL = 120
+STATE_FILE = "last_battle.json"
+# =================================================
 
+API_BASE = "https://api.brawlapi.com/v1"
+bot = telebot.TeleBot(BOT_TOKEN)
 
-def api(tag):
-    r=requests.get(f"{API}/players/%23{tag.replace('#','')}",headers=HEADERS,timeout=15)
-    return r.status_code,r.text
-
-
-def get(tag):
-    s,t=api(tag)
-    if s==200:return json.loads(t)
+def load_last_battle():
+    if os.path.exists(STATE_FILE):
+        with open(STATE_FILE, "r") as f:
+            return json.load(f)
     return None
 
-@bot.message_handler(commands=['track'])
-def track(m):
-    a=m.text.split()
-    if len(a)<2:return
-    tag=a[1].upper()
-    if not tag.startswith('#'):tag='#'+tag
-    p=get(tag)
-    if not p:
-        s,t=api(tag);bot.reply_to(m,f'🛠 API DEBUG\nSTATUS: {s}\n{t[:800]}');return
-    players[tag]={'chat':m.chat.id,'b':{x['name']:x['trophies'] for x in p['brawlers']}}
-    bot.reply_to(m,'✅ Отслеживание включено '+tag)
+def save_last_battle(battle):
+    with open(STATE_FILE, "w") as f:
+        json.dump(battle, f)
 
-@bot.message_handler(commands=['status'])
-def status(m):bot.reply_to(m,'\n'.join(players) if players else 'Пусто')
+def get_battle_log(tag):
+    encoded = tag.replace("#", "%23")
+    url = f"{API_BASE}/players/{encoded}/battlelog"
+    resp = requests.get(url)
+    if resp.status_code == 200:
+        return resp.json().get("items", [])
+    return []
 
+def get_player(tag):
+    encoded = tag.replace("#", "%23")
+    url = f"{API_BASE}/players/{encoded}"
+    resp = requests.get(url)
+    if resp.status_code == 200:
+        return resp.json()
+    return None
 
-def loop():
+def format_battle(battle, player_tag):
+    try:
+        event = battle.get("event", {})
+        mode = event.get("mode", "Unknown")
+        map_name = event.get("map", "Unknown")
+
+        result = battle.get("battle", {})
+        outcome = result.get("result", "?")
+        trophy_change = result.get("trophyChange", 0)
+
+        brawler_name = "?"
+        teams = result.get("teams", [])
+        for team in teams:
+            for player in team:
+                if player.get("tag", "").upper() == player_tag.upper():
+                    brawler = player.get("brawler", {})
+                    brawler_name = brawler.get("name", "?")
+                    break
+
+        emoji = "✅" if outcome == "victory" else "❌" if outcome == "defeat" else "🤝"
+        trophy_str = f"+{trophy_change}" if trophy_change > 0 else str(trophy_change)
+
+        return (
+            f"{emoji} <b>{outcome.upper()}</b>\n"
+            f"🗺 {mode} — {map_name}\n"
+            f"🥊 Бравлер: {brawler_name}\n"
+            f"🏆 Трофеи: {trophy_str}"
+        )
+    except Exception as e:
+        return f"Новый матч (ошибка парсинга: {e})"
+
+def check_battles():
     while True:
-        for tag,d in list(players.items()):
-            p=get(tag)
-            if not p: continue
-            now={x['name']:x['trophies'] for x in p['brawlers']}
-            for n,v in now.items():
-                if n in d['b'] and d['b'][n]!=v:
-                    old=d['b'][n];bot.send_message(d['chat'],f"{'📈' if v>old else '📉'} {n}\n{old} → {v}\n({v-old:+})")
-            d['b']=now
-        time.sleep(60)
+        try:
+            battles = get_battle_log(PLAYER_TAG)
+            if battles:
+                latest = battles[0]
+                battle_time = latest.get("battleTime", "")
+                last = load_last_battle()
+                last_time = last.get("time") if last else None
+                if battle_time != last_time:
+                    save_last_battle({"time": battle_time})
+                    text = format_battle(latest, PLAYER_TAG)
+                    bot.send_message(CHAT_ID, text, parse_mode="HTML")
+        except Exception as e:
+            print(f"Ошибка проверки: {e}")
+        time.sleep(CHECK_INTERVAL)
 
-threading.Thread(target=loop,daemon=True).start()
-bot.infinity_polling()
+@bot.message_handler(commands=["stats"])
+def cmd_stats(message):
+    player = get_player(PLAYER_TAG)
+    if not player:
+        bot.reply_to(message, "Не удалось получить данные.")
+        return
+    name = player.get("name", "?")
+    trophies = player.get("trophies", 0)
+    highest = player.get("highestTrophies", 0)
+    club = player.get("club", {}).get("name", "Нет клуба")
+    text = (
+        f"👤 <b>{name}</b>\n"
+        f"🏆 Трофеев: {trophies} (макс: {highest})\n"
+        f"🤝 Клуб: {club}"
+    )
+    bot.send_message(message.chat.id, text, parse_mode="HTML")
+
+# Запуск проверки в фоне
+t = threading.Thread(target=check_battles, daemon=True)
+t.start()
+
+print("Бот запущен!")
+bot.polling(none_stop=True)
